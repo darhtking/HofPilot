@@ -75,8 +75,6 @@ def load_all_schlage():
 
 def save_schlag(schlag_name):
     """Einen neuen Schlag anlegen (leerer Eintrag als Platzhalter, falls noch keine Gabe)."""
-    # Schlag existiert bereits, wenn er in n_bilanz vorkommt – kein separater Schritt nötig.
-    # Diese Funktion gibt nur den Namen zurück, damit er in der Session gespeichert wird.
     return schlag_name
 
 def save_to_supabase(schlag, datum, art, menge, bemerkung=""):
@@ -110,7 +108,7 @@ def load_from_supabase(schlag):
         conn.close()
         return [
             {
-                "Datum": r[0],
+                "Datum": r[0].strftime("%d.%m.%Y") if r[0] else "",
                 "Art": r[1],
                 "N_Menge": r[2],
                 "Bemerkung": r[3] if r[3] else ""
@@ -177,16 +175,24 @@ if "ausgewaehlter_schlag" in st.session_state:
     if st.session_state.ausgewaehlter_schlag in schlag_optionen:
         vorauswahl_index = schlag_optionen.index(st.session_state.ausgewaehlter_schlag)
 
-field_name = st.sidebar.selectbox(
-    "Schlag auswählen",
-    schlag_optionen,
-    index=vorauswahl_index
-)
-st.session_state.ausgewaehlter_schlag = field_name
+# --- Schlag auswählen als Expander ---
+with st.sidebar.expander("🗺️ Schlag auswählen", expanded=True):
+    field_name = st.selectbox(
+        "Schlag",
+        schlag_optionen,
+        index=vorauswahl_index,
+        label_visibility="collapsed"
+    )
+    st.session_state.ausgewaehlter_schlag = field_name
 
-# Kultur wählen
+# --- Kultur wählen als Expander ---
 st.sidebar.header("Feldeinstellungen")
-crop = st.sidebar.selectbox("Kultur wählen", list(PLANT_DATA.keys()))
+with st.sidebar.expander("🌾 Kultur auswählen", expanded=True):
+    crop = st.selectbox(
+        "Kultur",
+        list(PLANT_DATA.keys()),
+        label_visibility="collapsed"
+    )
 
 # Automatisches Laden der Daten, wenn sich der Schlagname ändert
 if "current_field" not in st.session_state or st.session_state.current_field != field_name:
@@ -197,25 +203,26 @@ base_demand = PLANT_DATA[crop]["bedarf"]
 base_yield  = PLANT_DATA[crop]["ertrag"]
 
 st.subheader(f"Düngebedarf für {crop} – Schlag: {field_name}")
-actual_yield = st.number_input(f"Erwarteter Ertrag (dt/ha)", value=float(base_yield), step=1.0)
+actual_yield = st.number_input(f"Erwarteter Ertrag (dt/ha)", value=float(base_yield), step=5.0)
 
 yield_diff      = actual_yield - base_yield
 adjusted_demand = base_demand + (yield_diff * 1.2)
 
 st.info(f"Gesetzlicher Bedarf: **{adjusted_demand:.1f} kg N/ha**")
 
+# Summe bereits gedüngter N (wird auch im Expander für Vorschau gebraucht)
+total_n = sum(item["N_Menge"] for item in st.session_state.historie)
+
 # --- 5. NEUE GABE HINZUFÜGEN ---
 with st.expander("Neue Gabe hinzufügen", expanded=True):
     col_date, col_type, col_amount = st.columns([2, 2, 1])
     with col_date:
-        datum_input = st.date_input("Datum", value=date.today())
+        datum_input = st.date_input("Datum", value=date.today(), format="DD.MM.YYYY")
     with col_type:
         art_input = st.selectbox("Düngerart", ["KAS", "Harnstoff", "Gülle", "Gärrest", "AHL"])
     with col_amount:
-        # ✅ Änderung 1: Schrittweite auf 5 geändert
         menge_input = st.number_input("Menge (kg N/ha)", min_value=0, step=5)
 
-    # ✅ Änderung 3: Bemerkungen optional per Checkbox
     bemerkung_aktiv = st.checkbox("📝 Bemerkung hinzufügen")
     bemerkung_input = ""
     if bemerkung_aktiv:
@@ -225,20 +232,30 @@ with st.expander("Neue Gabe hinzufügen", expanded=True):
             max_chars=300
         )
 
+    # Vorschau: Saldo nach dieser Gabe
+    saldo_vorschau = total_n + menge_input - adjusted_demand
+    if menge_input > 0 and saldo_vorschau > 0:
+        st.warning(
+            f"⚠️ Diese Gabe würde das N-Saldo überschreiten! "
+            f"Neues Saldo nach Speichern: **+{saldo_vorschau:.1f} kg N/ha**"
+        )
+
     if st.button("Gabe in Cloud speichern"):
         save_to_supabase(field_name, datum_input, art_input, menge_input, bemerkung_input)
-        # Schlagliste aktualisieren (falls neuer Schlag über Gabe erstmals befüllt wird)
         st.session_state.alle_schlage = load_all_schlage()
         st.session_state.historie = load_from_supabase(field_name)
         st.success("Erfolgreich in Supabase gespeichert!")
         st.rerun()
 
 # --- 6. HISTORIE & SALDO ---
-total_n = sum(item["N_Menge"] for item in st.session_state.historie)
 
 if st.session_state.historie:
     st.write("### Historie (aus Cloud geladen)")
     df_hist = pd.DataFrame(st.session_state.historie)
+
+    # ✅ Änderung 1: Index beginnt bei 1
+    df_hist.index = range(1, len(df_hist) + 1)
+
     # Bemerkungsspalte nur anzeigen, wenn mindestens eine Bemerkung vorhanden
     if df_hist["Bemerkung"].str.strip().any():
         st.table(df_hist)
